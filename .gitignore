@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+
+# Virtual Environment
+myvenv/
+venv/
+.env/
+
+# Environment variables (IMPORTANT - keep secrets safe)
+.env
+
+# Output files (generated)
+output/
+*.mp3
+# *.mp4
+*.txt
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
