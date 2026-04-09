@@ -1,0 +1,16 @@
+{
+  "iv_clinic": {
+    "name": "Mobile IV Clinic",
+    "industry": "Wellness",
+    "tone": "Professional, clean, and high-end",
+    "cta": "Click the link in bio to book your mobile IV session!",
+    "bg_video": "assets/iv_clinic/background.mp4"
+  },
+  "car_detailing": {
+    "name": "Luxury Car Detailing",
+    "industry": "Automotive",
+    "tone": "High-energy, fast-paced, and satisfying",
+    "cta": "DM 'GLOSS' for a free quote!",
+    "bg_video": "assets/car_detailing/background.mp4"
+  }
+}
