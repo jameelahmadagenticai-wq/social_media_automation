@@ -1,35 +1,58 @@
 import datetime
 import os
+import traceback
+import json
 from dotenv import load_dotenv
 from gtts import gTTS
-import requests
-
-os.environ["IMAGEMAGICK_BINARY"] = r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe"
-
-from moviepy.editor import (
-    AudioFileClip,
-    CompositeVideoClip,
-    TextClip,
-    VideoFileClip,
-)
-from moviepy.config import change_settings
+from PIL import Image
 from openai import OpenAI
 import telebot
+from telebot import apihelper
+
+# ─────────────────────────────────────────
+#  MoviePy / ImageMagick
+# ─────────────────────────────────────────
+IMAGEMAGICK_PATH = r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe"
+os.environ["IMAGEMAGICK_BINARY"] = IMAGEMAGICK_PATH
+
+from moviepy.editor import AudioFileClip, CompositeVideoClip, TextClip, VideoFileClip
+from moviepy.config import change_settings
+
+change_settings({"IMAGEMAGICK_BINARY": IMAGEMAGICK_PATH})
+
+# ─────────────────────────────────────────
+#  Pillow compatibility shim
+# ─────────────────────────────────────────
+if not hasattr(Image, "ANTIALIAS"):
+    Image.ANTIALIAS = Image.Resampling.LANCZOS
+
+
+# ══════════════════════════════════════════════════════════════
+#  ENVIRONMENT
+# ══════════════════════════════════════════════════════════════
 
 load_dotenv()
 
-change_settings({"IMAGEMAGICK_BINARY": r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe"})
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+WEBHOOK_URL    = os.getenv("WEBHOOK_URL")
+OUTPUT_DIR     = "output"
+MAX_FILES      = int(os.getenv("MAX_OUTPUT_FILES", 20))
 
-bot = telebot.TeleBot(os.getenv("TELEGRAM_TOKEN"))
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+bot    = telebot.TeleBot(TELEGRAM_TOKEN)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# =============================================================================
-# PROMPT
-# =============================================================================
+apihelper.CONNECT_TIMEOUT = 60
+apihelper.READ_TIMEOUT    = 120
+
+
+# ══════════════════════════════════════════════════════════════
+#  SESSION 1 — SCRIPT GENERATION
+# ══════════════════════════════════════════════════════════════
 
 IV_CLINIC_PROMPT = """You are a world-class direct response copywriter specializing in high-end mobile IV therapy services.
 
-Your task is to write a high-converting short-form video script (for TikTok, Instagram Reels, and YouTube Shorts) based on the user’s topic.
+Your task is to write a high-converting short-form video script (for TikTok, Instagram Reels, and YouTube Shorts) based on the user's topic.
 
 ━━━━━━━━━━━━━━━━━━━
 OUTPUT RULES (STRICT)
@@ -60,237 +83,295 @@ PACING & DELIVERY
 ━━━━━━━━━━━━━━━━━━━
 SCRIPT STRUCTURE
 ━━━━━━━━━━━━━━━━━━━
-
-1. HOOK (first 2–3 seconds)
-   - Grab attention immediately
-   - Target pain points like fatigue, dehydration, hangover, burnout, low energy
-
+1. HOOK (first 2-3 seconds)
 2. PROBLEM
-   - Explain why common solutions (water, rest, coffee) don’t work fast enough
-
 3. SOLUTION
-   - Introduce mobile IV therapy
-   - Emphasize:
-     • Fast absorption
-     • Direct delivery into bloodstream
-     • At-home convenience
-     • Premium experience
-
 4. BENEFITS
-   - Energy boost
-   - Hydration
-   - Recovery
-   - Wellness improvement
-
-5. CALL TO ACTION (VERY IMPORTANT)
-   - Clear and direct
-   - Example: “Book now through the link in bio”
-
-━━━━━━━━━━━━━━━━━━━
-GOAL
-━━━━━━━━━━━━━━━━━━━
-- Make the viewer feel the pain
-- Position the service as the fastest and most effective solution
-- Drive immediate action and conversions
+5. CALL TO ACTION
 
 ━━━━━━━━━━━━━━━━━━━
 FINAL INSTRUCTION
 ━━━━━━━━━━━━━━━━━━━
 Return ONLY the final voiceover script.
-Do not add anything else."""
+Do not add anything else.
+"""
 
-# =============================================================================
-# 🔥 INTERNAL FUNCTIONS
-# =============================================================================
+def session_script(topic: str) -> str:
+    """Generate script via GPT-4o. Returns saved filename."""
 
-def generate_script_internal(topic):
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[
             {"role": "system", "content": IV_CLINIC_PROMPT},
-            {"role": "user", "content": f"Write a script about: {topic}"},
-        ],
+            {"role": "user",   "content": f"Write about: {topic}"},
+        ]
     )
 
-    script_content = response.choices[0].message.content
+    script_text = response.choices[0].message.content.strip()
+    filename    = f"script_{_ts()}.txt"
+    _save_text(filename, script_text)
 
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe_topic = topic.replace(" ", "_")[:20]
-    filepath = f"output/script_{timestamp}_{safe_topic}.txt"
-
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(script_content)
-
-    return os.path.basename(filepath)
+    return filename
 
 
-def generate_voiceover_internal(script_filename):
-    filepath = f"output/{script_filename}"
+# ══════════════════════════════════════════════════════════════
+#  SESSION 2 — AUDIO (TTS + Whisper word timestamps)
+# ══════════════════════════════════════════════════════════════
 
-    with open(filepath, "r", encoding="utf-8") as f:
-        script_text = f.read()
+def session_audio(script_file: str) -> tuple[str, str]:
+    """
+    1. Convert script → MP3 via gTTS
+    2. Run Whisper on the MP3 to get word-level timestamps
+    3. Save timestamps as a JSON sidecar file
 
-    tts = gTTS(text=script_text, lang="en", slow=False)
-    mp3_path = filepath.replace(".txt", ".mp3")
-    tts.save(mp3_path)
+    Returns (audio_filename, timestamps_filename)
+    """
 
-    return os.path.basename(mp3_path)
+    script_text = _load_text(script_file)
+
+    # — TTS —
+    audio_filename = script_file.replace(".txt", ".mp3")
+    audio_path     = _path(audio_filename)
+    gTTS(text=script_text).save(audio_path)
+
+    # — Whisper word timestamps —
+    with open(audio_path, "rb") as f:
+        whisper_result = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=f,
+            response_format="verbose_json",
+            timestamp_granularities=["word"],
+        )
+
+    # whisper_result.words = list of {"word", "start", "end"}
+    words = [
+        {"word": w.word.strip(), "start": w.start, "end": w.end}
+        for w in whisper_result.words
+        if w.word.strip()
+    ]
+
+    ts_filename = script_file.replace(".txt", "_timestamps.json")
+    _save_text(ts_filename, json.dumps(words, ensure_ascii=False, indent=2))
+
+    return audio_filename, ts_filename
 
 
-def create_video_internal(audio_filename):
-    audio_path = f"output/{audio_filename}"
-    bg_video_path = "assets/background.mp4"
+# ══════════════════════════════════════════════════════════════
+#  SESSION 3 — VIDEO (background loop)
+# ══════════════════════════════════════════════════════════════
 
-    audio_clip = AudioFileClip(audio_path)
-    video_clip = VideoFileClip(bg_video_path)
+def session_video(audio_file: str) -> str:
+    """Loop background.mp4 to match audio duration. Returns video filename."""
 
-    if video_clip.duration < audio_clip.duration:
-        video_clip = video_clip.loop(duration=audio_clip.duration)
+    audio = AudioFileClip(_path(audio_file))
+    video = VideoFileClip("assets/background.mp4")
+
+    # Crop to vertical 9:16 (720 × 1280)
+    video = video.resize(height=1280)
+    if video.w > 720:
+        video = video.crop(x_center=video.w / 2, width=720)
+
+    # Loop or trim to exact audio length
+    if video.duration < audio.duration:
+        video = video.loop(duration=audio.duration)
     else:
-        video_clip = video_clip.subclip(0, audio_clip.duration)
+        video = video.subclip(0, audio.duration)
 
-    final_clip = video_clip.set_audio(audio_clip)
-    output_video_path = audio_path.replace(".mp3", ".mp4")
+    video = video.set_audio(audio)
 
-    final_clip.write_videofile(
-        output_video_path,
-        fps=24,
-        codec="libx264",
-        audio_codec="aac",
-        verbose=False,
-        logger=None,
+    video_file = audio_file.replace(".mp3", "_bg.mp4")
+    video.write_videofile(
+        _path(video_file),
+        fps=24, codec="libx264", audio_codec="aac",
+        preset="ultrafast", threads=4, bitrate="1000k",
+        verbose=False, logger=None,
     )
 
-    final_clip.close()
-    audio_clip.close()
-    video_clip.close()
+    audio.close()
+    video.close()
 
-    return os.path.basename(output_video_path)
+    return video_file
 
 
-def add_text_internal(video_filename, script_filename):
-    video_path = f"output/{video_filename}"
-    script_path = f"output/{script_filename}"
+# ══════════════════════════════════════════════════════════════
+#  SESSION 4 — TEXT OVERLAY  (100% Whisper-synced)
+# ══════════════════════════════════════════════════════════════
 
-    video_clip = VideoFileClip(video_path)
+WORDS_PER_CHUNK = 5        # words shown at once — tune freely
+FONT_SIZE       = 68
+TEXT_Y_RATIO    = 0.55     # vertical position (0 = top, 1 = bottom)
 
-    with open(script_path, "r", encoding="utf-8") as f:
-        script_text = f.read()
 
-    sentences = [s.strip() for s in script_text.split(".") if s.strip()]
-    total_duration = video_clip.duration
+def session_text_overlay(video_file: str, timestamps_file: str) -> str:
+    """
+    Burn subtitles onto the video using exact Whisper timestamps.
+    Words are grouped into chunks; each chunk appears/disappears
+    at the exact millisecond Whisper detected them in the audio.
 
-    char_counts = [len(s) for s in sentences]
-    total_chars = sum(char_counts)
-    durations = [(c / total_chars) * total_duration for c in char_counts]
+    Returns final video filename.
+    """
 
-    txt_clips = []
-    start_time = 0
+    video = VideoFileClip(_path(video_file))
+    words = json.loads(_load_text(timestamps_file))
 
-    for sentence, duration in zip(sentences, durations):
-        txt_clip = TextClip(
-            sentence,
-            fontsize=60,
-            color="white",
-            font="Arial-Bold",
-            stroke_color="black",
-            stroke_width=2,
-            size=(video_clip.w - 100, None),
-            method="caption",
-        )
+    # — Group words into chunks of WORDS_PER_CHUNK —
+    chunks = []
+    for i in range(0, len(words), WORDS_PER_CHUNK):
+        group  = words[i : i + WORDS_PER_CHUNK]
+        text   = " ".join(w["word"] for w in group)
+        start  = group[0]["start"]
+        end    = group[-1]["end"]
+        chunks.append({"text": text, "start": start, "end": end})
 
-        txt_clip = (
-            txt_clip.set_position("center")
-            .set_start(start_time)
+    # — Build TextClips from chunks —
+    text_clips = []
+    for chunk in chunks:
+        duration = chunk["end"] - chunk["start"]
+        if duration <= 0:
+            continue
+
+        clip = (
+            TextClip(
+                chunk["text"],
+                fontsize=FONT_SIZE,
+                color="white",
+                font="Arial-Bold",
+                stroke_color="black",
+                stroke_width=3,
+                size=(int(video.w * 0.85), None),
+                method="caption",
+                align="center",
+            )
+            .set_position(("center", video.h * TEXT_Y_RATIO))
+            .set_start(chunk["start"])
             .set_duration(duration)
+            .crossfadein(0.06)
+            .crossfadeout(0.06)
         )
+        text_clips.append(clip)
 
-        txt_clips.append(txt_clip)
-        start_time += duration
+    # — Composite & export —
+    final = CompositeVideoClip([video] + text_clips)
 
-    final_video = CompositeVideoClip([video_clip] + txt_clips)
-    output_path = video_path.replace(".mp4", "_final.mp4")
-
-    final_video.write_videofile(
-        output_path,
-        fps=24,
-        codec="libx264",
-        audio_codec="aac",
-        verbose=False,
-        logger=None,
+    final_file = video_file.replace("_bg.mp4", "_final.mp4")
+    final.write_videofile(
+        _path(final_file),
+        fps=24, codec="libx264", audio_codec="aac",
+        preset="ultrafast", threads=4, bitrate="1000k",
+        verbose=False, logger=None,
     )
 
-    final_video.close()
-    video_clip.close()
+    video.close()
+    final.close()
 
-    return os.path.basename(output_path)
+    return final_file
 
-# =============================================================================
-# ☁️ N8N UPLOAD FUNCTION (NEW)
-# =============================================================================
 
-def upload_to_cloud(filepath):
-    webhook_url = "http://localhost:5678/webhook/upload-video"
+# ══════════════════════════════════════════════════════════════
+#  SESSION 5 — WEBHOOK UPLOAD
+# ══════════════════════════════════════════════════════════════
 
-    with open(filepath, 'rb') as f:
-        files = {
-            'file': (os.path.basename(filepath), f, 'video/mp4')
-        }
-        # Use 'data' key if you parse JSON in n8n
-        response = requests.post(webhook_url, files=files)
+def session_webhook(final_file: str) -> bool:
+    """Upload finished video to webhook. Returns True on success."""
 
-    print("Upload response:", response.status_code, response.text)
-    return response.status_code, response.text
+    import requests
 
-# =============================================================================
-# 🚀 FULL PIPELINE COMMAND
-# =============================================================================
-
-@bot.message_handler(commands=["full_pipeline"])
-def run_full_pipeline(message):
     try:
-        topic = message.text.split(" ", 1)[1]
+        with open(_path(final_file), "rb") as f:
+            res = requests.post(
+                WEBHOOK_URL,
+                files={"file": (final_file, f, "video/mp4")},
+                timeout=120,
+            )
+        print(f"[webhook] {res.status_code} — {res.text}")
+        return res.status_code == 200
+    except Exception as e:
+        print(f"[webhook] Upload failed: {e}")
+        return False
+
+
+# ══════════════════════════════════════════════════════════════
+#  PIPELINE  — ties all sessions together
+# ══════════════════════════════════════════════════════════════
+
+@bot.message_handler(commands=["generate_video"])
+def pipeline(message):
+    try:
+        _cleanup_output_folder()
+
+        parts = message.text.split(" ", 1)
+        if len(parts) < 2 or not parts[1].strip():
+            bot.reply_to(message, "❌ Please provide a topic.\nExample: /generate_video hangover recovery")
+            return
+
+        topic = parts[1].strip()
 
         bot.reply_to(
             message,
-            f"🚀 Starting Full Pipeline for: *{topic}*\n(This will take 2-3 minutes)",
+            f"🎬 Your video is being processed…\n_Topic: {topic}_",
             parse_mode="Markdown",
         )
 
-        # 1. Script
-        script_filename = generate_script_internal(topic)
+        # Run all sessions silently
+        script_file            = session_script(topic)
+        audio_file, ts_file    = session_audio(script_file)
+        video_file             = session_video(audio_file)
+        final_file             = session_text_overlay(video_file, ts_file)
 
-        # 2. Voice
-        audio_filename = generate_voiceover_internal(script_filename)
+        # Deliver video
+        with open(_path(final_file), "rb") as v:
+            bot.send_video(message.chat.id, v, caption="🔥 Your video is ready!")
 
-        # 3. Video
-        video_filename = create_video_internal(audio_filename)
+        # Session 5 — Webhook (silent)
+        if WEBHOOK_URL:
+            session_webhook(final_file)
+            bot.send_message(message.chat.id, "☁️ Uploaded to cloud successfully.")
 
-        # 4. Captions
-        final_output = add_text_internal(video_filename, script_filename)
+    except Exception:
+        print(traceback.format_exc())
+        bot.reply_to(message, "❌ Something went wrong. Please try again.")
 
-        # 5. Send to Telegram
-        with open(f"output/{final_output}", "rb") as video:
-            bot.send_video(
-                message.chat.id,
-                video,
-                caption="🔥 Your high-converting IV Clinic video is ready!",
-            )
 
-        # 6. Upload to n8n
-        status, response_text = upload_to_cloud(f"output/{final_output}")
+# ══════════════════════════════════════════════════════════════
+#  HELPERS
+# ══════════════════════════════════════════════════════════════
 
-        bot.reply_to(
-            message,
-            f"☁️ Uploaded to n8n successfully ✅\nStatus: {status}"
-        )
+def _ts() -> str:
+    return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    except Exception as e:
-        bot.reply_to(message, f"❌ Pipeline failed: {str(e)}")
 
-# =============================================================================
-# ENTRY
-# =============================================================================
+def _path(filename: str) -> str:
+    return os.path.join(OUTPUT_DIR, filename)
 
-print("OpenClaw FULL PIPELINE + n8n is active ")
-bot.polling()
+
+def _save_text(filename: str, content: str):
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    with open(_path(filename), "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def _load_text(filename: str) -> str:
+    with open(_path(filename), "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def _cleanup_output_folder():
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    files = sorted(
+        [_path(f) for f in os.listdir(OUTPUT_DIR)],
+        key=os.path.getctime,
+    )
+    for old_file in files[:-MAX_FILES]:
+        try:
+            os.remove(old_file)
+        except Exception:
+            pass
+
+
+# ══════════════════════════════════════════════════════════════
+#  ENTRY POINT
+# ══════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    print("🚀 Bot running…")
+    bot.polling()
