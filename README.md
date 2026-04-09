@@ -97,7 +97,7 @@ Create a `brands.json` file in the root folder:
 
 ### 1. Clone Repo
 ```bash
-git clone https://github.com/your-username/openclaw-bot.git
+git clone https://github.com/sem-naq/Mobile-IV-Clinic.git
 cd openclaw-bot
 ```
 
