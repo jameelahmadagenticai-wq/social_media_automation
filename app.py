@@ -478,4 +478,4 @@ if __name__ == "__main__":
     print(f"   Active brand : {CURRENT_BRAND} ({BRANDS[CURRENT_BRAND]['name']})")
     print(f"   Output dir   : {OUTPUT_DIR}/")
     print(f"   Webhook URL  : {WEBHOOK_URL or 'not set'}")
-    bot.polling()
+    bot.polling(none_stop=True, timeout=60)

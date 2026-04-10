@@ -174,9 +174,62 @@ Set this as `WEBHOOK_URL` in your `.env` file. Make sure the n8n workflow is act
 
 ```powershell
 npm install -g pm2
-pm2 start bot.py --name "openclaw-bot" --interpreter "D:\openclaw_bot\myvenv\Scripts\python.exe" --cwd "D:\openclaw_bot"
+pm2 start app.py --name "openclaw-bot" --interpreter "D:\openclaw_bot\myvenv\Scripts\python.exe" --cwd "D:\openclaw_bot"
 pm2 save
 ```
+
+
+**when pm2 method distrub and code crash terminal show again and agian then best way**
+
+# ============================================
+# ONE-TIME SETUP (Run as Administrator once)
+# ============================================
+
+# Creates background task - auto starts bot 2min after login (gives VPN time to connect)
+schtasks /create /tn "OpenclawBot" /tr "D:\openclaw_bot\myvenv\Scripts\python.exe D:\openclaw_bot\app.py" /sc onlogon /rl highest /delay 0002:00 /f
+
+
+# ============================================
+# DAILY COMMANDS (Regular PowerShell)
+# ============================================
+
+# Start the bot manually
+schtasks /run /tn "OpenclawBot"
+
+# Stop the bot
+schtasks /end /tn "OpenclawBot"
+
+# Restart the bot
+schtasks /end /tn "OpenclawBot"
+schtasks /run /tn "OpenclawBot"
+
+# Check if bot is running (should show python process)
+Get-Process python
+
+
+# ============================================
+# EMERGENCY / CLEANUP
+# ============================================
+
+# Force kill all python processes (if bot is stuck)
+Stop-Process -Name python -Force
+
+# Delete the scheduled task (if you want to remove bot completely)
+schtasks /delete /tn "OpenclawBot" /f
+
+
+# ============================================
+# IMPORTANT REMINDERS
+# ============================================
+# 1. Always connect VPN FIRST before starting bot
+# 2. Never use PM2 - it crashes your laptop
+# 3. Bot auto-starts 2 min after login automatically
+# 4. One-time setup requires Admin PowerShell
+# 5. Daily commands work in regular PowerShell
+
+
+
+
 
 **Option 2: Task Scheduler**
 
