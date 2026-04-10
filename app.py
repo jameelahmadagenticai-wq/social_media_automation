@@ -52,7 +52,7 @@ bot    = telebot.TeleBot(TELEGRAM_TOKEN)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 apihelper.CONNECT_TIMEOUT = 60
-apihelper.READ_TIMEOUT    = 120
+apihelper.READ_TIMEOUT    = 600
 
 
 # ══════════════════════════════════════════════════════════════
@@ -248,7 +248,7 @@ def session_video(audio_file: str) -> str:
         audio_codec="aac",
         preset="ultrafast",
         threads=4,
-        bitrate="1000k",
+        bitrate="600k",
         verbose=False,
         logger=None,
     )
@@ -324,7 +324,7 @@ def session_text_overlay(video_file: str, timestamps_file: str) -> str:
         audio_codec="aac",
         preset="ultrafast",
         threads=4,
-        bitrate="1000k",
+        bitrate="600k",
         verbose=False,
         logger=None,
     )
@@ -341,12 +341,6 @@ def session_text_overlay(video_file: str, timestamps_file: str) -> str:
 # ══════════════════════════════════════════════════════════════
 
 def session_webhook(final_file: str) -> bool:
-    """
-    Upload the finished video to WEBHOOK_URL as multipart/form-data.
-
-    Returns True on HTTP 200, False on any error.
-    Skipped automatically if WEBHOOK_URL is not set.
-    """
     if not WEBHOOK_URL:
         print("[webhook] WEBHOOK_URL not set — skipping upload.")
         return False
@@ -355,9 +349,11 @@ def session_webhook(final_file: str) -> bool:
         with open(_path(final_file), "rb") as f:
             response = requests.post(
                 WEBHOOK_URL,
+                data={"brand": CURRENT_BRAND},  # ✅ ADD THIS
                 files={"file": (final_file, f, "video/mp4")},
                 timeout=120,
             )
+
         print(f"[webhook] {response.status_code} — {response.text}")
         return response.status_code == 200
 
