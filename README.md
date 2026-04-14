@@ -382,6 +382,11 @@ Double-click to launch, or schedule via Task Scheduler.
 
 > **Note:** Avoid PM2 on Windows — it can cause instability. Task Scheduler is the most reliable option.
 
+D:\openclaw_bot>
+pm2 start app.py --name openclaw-bot --interpreter "D:\openclaw_bot\myvenv\Scripts\python.exe"
+pm2 save
+pm2 startup
+
 ---
 
 ## ☁️ n8n Webhook Integration
